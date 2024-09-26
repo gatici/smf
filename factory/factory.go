@@ -14,7 +14,6 @@ import (
 	"os"
 	"sync"
 
-	"github.com/omec-project/config5g/proto/client"
 	"github.com/omec-project/smf/logger"
 	"gopkg.in/yaml.v2"
 )
@@ -48,7 +47,7 @@ func InitConfigFactory(f string) error {
 
 		roc := os.Getenv("MANAGED_BY_CONFIG_POD")
 		if roc == "true" {
-			gClient := client.ConnectToConfigServer(SmfConfig.Configuration.WebuiUri)
+			gClient := ConnectToConfigServer(SmfConfig.Configuration.WebuiUri)
 			commChannel := gClient.PublishOnConfigChange(false)
 			go SmfConfig.updateConfig(commChannel)
 		}
