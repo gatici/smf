@@ -5,7 +5,7 @@
 package factory
 
 import (
-	"context"
+	context "context"
 	"math/rand"
 	"os"
 	"time"
@@ -15,7 +15,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -31,13 +30,13 @@ func init() {
 }
 
 type PlmnId struct {
-	Mcc string
-	Mnc string
+	MCC string
+	MNC string
 }
 
 type Nssai struct {
-	Sst string
-	Sd  string
+	sst string
+	sd  string
 }
 
 type ConfigClient struct {
@@ -64,7 +63,7 @@ type ConfClient interface {
 
 // This API is added to control metadata from NF Clients
 func ConnectToConfigServer(host string) ConfClient {
-	confClient := CreateChannel(host, 10000)
+	confClient := CreateChannel(host, 60)
 	if confClient == nil {
 		logger.GrpcLog.Errorln("create grpc channel to config pod failed")
 		return nil
@@ -141,13 +140,12 @@ func newClientConnection(host string) (conn *grpc.ClientConn, err error) {
 	bc := backoff.Config{BaseDelay: bd, Multiplier: mltpr, Jitter: jitter, MaxDelay: MaxDelay}
 
 	crt := grpc.ConnectParams{Backoff: bc}
-	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithKeepaliveParams(kacp), grpc.WithDefaultServiceConfig(retryPolicy), grpc.WithConnectParams(crt)}
-	conn, err = grpc.NewClient(host, dialOptions...)
+	dialOptions := []grpc.DialOption{grpc.WithInsecure(), grpc.WithKeepaliveParams(kacp), grpc.WithDefaultServiceConfig(retryPolicy), grpc.WithConnectParams(crt)}
+	conn, err = grpc.Dial(host, dialOptions...)
 	if err != nil {
-		logger.GrpcLog.Errorln("grpc newclient err: ", err)
+		logger.GrpcLog.Errorln("grpc dial err: ", err)
 		return nil, err
 	}
-	conn.Connect()
 	// defer conn.Close()
 	return conn, err
 }
@@ -223,6 +221,48 @@ func (confClient *ConfigClient) subscribeToConfigPod(commChan chan *protos.Netwo
 			commChan <- rsp
 		} else {
 			logger.GrpcLog.Errorf("Config Pod is restarted and no config received")
+		}
+	}
+}
+
+func readConfigInLoop(confClient *ConfigClient, commChan chan *protos.NetworkSliceResponse) {
+	myid := os.Getenv("HOSTNAME")
+	configReadTimeout := time.NewTicker(5000 * time.Millisecond)
+	for {
+		select {
+		case <-configReadTimeout.C:
+			status := confClient.Conn.GetState()
+			if status == connectivity.Ready {
+				rreq := &protos.NetworkSliceRequest{RestartCounter: selfRestartCounter, ClientId: myid, MetadataRequested: confClient.MetadataRequested}
+				rsp, err := confClient.Client.GetNetworkSlice(context.Background(), rreq)
+				if err != nil {
+					logger.GrpcLog.Errorln("read Network Slice config from webconsole failed : ", err)
+					continue
+				}
+				logger.GrpcLog.Debugf("#Network Slices %v, RC of configpod %v ", len(rsp.NetworkSlice), rsp.RestartCounter)
+				if configPodRestartCounter == 0 || (configPodRestartCounter == rsp.RestartCounter) {
+					// first time connection or config update
+					configPodRestartCounter = rsp.RestartCounter
+					if len(rsp.NetworkSlice) > 0 {
+						// always carries full config copy
+						logger.GrpcLog.Infoln("First time config Received ", rsp)
+						commChan <- rsp
+					} else if rsp.ConfigUpdated == 1 {
+						// config delete , all slices deleted
+						logger.GrpcLog.Infoln("Complete config deleted ")
+						commChan <- rsp
+					}
+				} else if len(rsp.NetworkSlice) > 0 {
+					logger.GrpcLog.Errorf("Config received after config Pod restart")
+					// config received after config pod restart
+					configPodRestartCounter = rsp.RestartCounter
+					commChan <- rsp
+				} else {
+					logger.GrpcLog.Errorf("Config Pod is restarted and no config received")
+				}
+			} else {
+				logger.GrpcLog.Errorln("read Network Slice config from webconsole skipped. GRPC channel down ")
+			}
 		}
 	}
 }
